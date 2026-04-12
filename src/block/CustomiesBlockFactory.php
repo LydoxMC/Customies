@@ -23,6 +23,7 @@ use pocketmine\inventory\CreativeInventory;
 use pocketmine\lang\Translatable;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\nbt\tag\ListTag;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\types\BlockPaletteEntry;
 use pocketmine\network\mcpe\protocol\types\CacheableNbt;
 use pocketmine\Server;
@@ -30,8 +31,10 @@ use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\SingletonTrait;
 use pocketmine\world\format\io\GlobalBlockStateHandlers;
 use function array_map;
+use function array_merge;
 use function array_reverse;
 use function hash;
+use function ksort;
 use function strcmp;
 use function usort;
 
@@ -43,11 +46,12 @@ final class CustomiesBlockFactory {
 	 * @phpstan-var array<string, array{(Closure(int): Block), (Closure(BlockStateWriter): Block), (Closure(Block): BlockStateReader)}>
 	 */
 	private array $blockFuncs = [];
-	/** @var BlockPaletteEntry[] */
+	/** @var BlockPaletteEntry[][] */
 	private array $blockPaletteEntries = [];
 	/** @var array<string, Block> */
 	private array $customBlocks = [];
 	private array $groups = [];
+	private bool $sorted = false;
 
 	/**
 	 * Adds a worker initialize hook to the async pool to sync the BlockFactory for every thread worker that is created.
@@ -86,10 +90,20 @@ final class CustomiesBlockFactory {
 
 	/**
 	 * Returns all the block palette entries that need to be sent to the client.
-	 * @return BlockPaletteEntry[]
+	 * @return BlockPaletteEntry[]|BlockPaletteEntry[][]
 	 */
-	public function getBlockPaletteEntries(): array {
-		return $this->blockPaletteEntries;
+	public function getBlockPaletteEntries(?int $protocolId = null): array {
+		ksort($this->blockPaletteEntries);
+		if($protocolId === null){
+			return $this->blockPaletteEntries;
+		}
+		$blockPaletteEntries = [];
+		foreach($this->blockPaletteEntries as $paletteProtocol => $entries){
+			if($protocolId <= $paletteProtocol){
+				$blockPaletteEntries = array_merge($blockPaletteEntries, $entries);
+			}
+		}
+		return $blockPaletteEntries;
 	}
 
 	/**
@@ -109,7 +123,7 @@ final class CustomiesBlockFactory {
 		CustomiesItemFactory::getInstance()->registerBlockItem($identifier, $block);
 		$this->customBlocks[$identifier] = $block;
 
-		$propertiesTag = CompoundTag::create();
+		$propertiesTags[ProtocolInfo::CURRENT_PROTOCOL] = CompoundTag::create();
 		$components = CompoundTag::create();
 		if($block instanceof BlockComponents) {
 			foreach ($block->getComponents() as $component) {
@@ -117,6 +131,7 @@ final class CustomiesBlockFactory {
 			}
 		}
 
+		$propertiesProtocol = [ProtocolInfo::CURRENT_PROTOCOL];
 		if($block instanceof Permutable) {
 			$blockPropertyNames = $blockPropertyValues = $blockProperties = [];
 			foreach($block->getBlockProperties() as $blockProperty){
@@ -124,14 +139,17 @@ final class CustomiesBlockFactory {
 				$blockPropertyValues[] = $blockProperty->getValues();
 				$blockProperties[] = $blockProperty->toNBT();
 			}
-			$permutations = array_map(static fn(Permutation $permutation) => $permutation->toNBT(), $block->getPermutations());
 
 			// The 'minecraft:on_player_placing' component is required for the client to predict block placement, making
 			// it a smoother experience for the end-user.
 			$components->setTag("minecraft:on_player_placing", CompoundTag::create());
-			$propertiesTag
-				->setTag("permutations", new ListTag($permutations))
-				->setTag("properties", new ListTag(array_reverse($blockProperties))); // fix client-side order
+
+			foreach($propertiesProtocol = array_merge([ProtocolInfo::CURRENT_PROTOCOL], ...array_map(static fn(Permutation $permutation) => $permutation->getProtocolIds(), $block->getPermutations())) as $protocolId){
+				$permutations = array_map(static fn(Permutation $permutation) => $permutation->toNBT($protocolId), $block->getPermutations());
+				($propertiesTags[$protocolId] ??= CompoundTag::create())
+					->setTag("permutations", new ListTag($permutations))
+					->setTag("properties", new ListTag(array_reverse($blockProperties))); // fix client-side order
+			}
 
 			foreach(Permutations::getCartesianProduct($blockPropertyValues) as $meta => $permutations){
 				// We need to insert states for every possible permutation to allow for all blocks to be used and to
@@ -169,56 +187,68 @@ final class CustomiesBlockFactory {
 		GlobalBlockStateHandlers::getSerializer()->map($block, $serializer);
 		GlobalBlockStateHandlers::getDeserializer()->map($identifier, $deserializer);
 
+		$addToCreative = $creativeInfo !== null;
+
 		$creativeInfo ??= CreativeInventoryInfo::DEFAULT();
-		$propertiesTag
-			->setTag("components",
-				$components->setTag("minecraft:creative_category", CompoundTag::create()
-					->setString("category", $creativeInfo->getCategory())
-					->setString("group", $creativeInfo->getGroup())))
-			->setTag("menu_category", CompoundTag::create()
-				->setString("category", $creativeInfo->getCategory() ?? "")
-				->setString("group", $creativeInfo->getGroup() ?? ""))
-			->setInt("molangVersion", 1);
+		$components->setTag("minecraft:creative_category", CompoundTag::create()
+			->setString("category", $creativeInfo->getCategory())
+			->setString("group", $creativeInfo->getGroup()));
+		foreach($propertiesProtocol as $protocolId){
+			($propertiesTags[$protocolId] ??= CompoundTag::create())
+				->setTag("components", $components)
+				->setTag("menu_category", CompoundTag::create()
+					->setString("category", $creativeInfo->getCategory() ?? "")
+					->setString("group", $creativeInfo->getGroup() ?? ""))
+				->setInt("molangVersion", 1);
+		}
 
-		if($creativeInfo !== null){
+		if($addToCreative){
 			$this->loadGroups();
-			if($creativeInfo->getCategory() === CreativeInventoryInfo::CATEGORY_ALL || $creativeInfo->getCategory() === CreativeInventoryInfo::CATEGORY_COMMANDS){
-				return;
+			if($creativeInfo->getCategory() !== CreativeInventoryInfo::CATEGORY_ALL && $creativeInfo->getCategory() !== CreativeInventoryInfo::CATEGORY_COMMANDS){
+				$group = $this->groups[$creativeInfo->getGroup()] ?? ($creativeInfo->getGroup() !== "" && $creativeInfo->getGroup() !== CreativeInventoryInfo::NONE ? new CreativeGroup(
+					new Translatable($creativeInfo->getGroup()),
+					$block->asItem()
+				) : null);
+
+				if($group !== null){
+					$this->groups[$group->getName()->getText()] = $group;
+				}
+
+				$category = match ($creativeInfo->getCategory()) {
+					CreativeInventoryInfo::CATEGORY_CONSTRUCTION => CreativeCategory::CONSTRUCTION,
+					CreativeInventoryInfo::CATEGORY_ITEMS => CreativeCategory::ITEMS,
+					CreativeInventoryInfo::CATEGORY_NATURE => CreativeCategory::NATURE,
+					CreativeInventoryInfo::CATEGORY_EQUIPMENT => CreativeCategory::EQUIPMENT,
+					default => throw new AssumptionFailedError("Unknown category")
+				};
+
+				CreativeInventory::getInstance()->add($block->asItem(), $category, $group);
 			}
-
-			$group = $this->groups[$creativeInfo->getGroup()] ?? ($creativeInfo->getGroup() !== "" && $creativeInfo->getGroup() !== CreativeInventoryInfo::NONE ? new CreativeGroup(
-				new Translatable($creativeInfo->getGroup()),
-				$block->asItem()
-			) : null);
-
-			if($group !== null){
-				$this->groups[$group->getName()->getText()] = $group;
-			}
-
-			$category = match ($creativeInfo->getCategory()) {
-				CreativeInventoryInfo::CATEGORY_CONSTRUCTION => CreativeCategory::CONSTRUCTION,
-				CreativeInventoryInfo::CATEGORY_ITEMS => CreativeCategory::ITEMS,
-				CreativeInventoryInfo::CATEGORY_NATURE => CreativeCategory::NATURE,
-				CreativeInventoryInfo::CATEGORY_EQUIPMENT => CreativeCategory::EQUIPMENT,
-				default => throw new AssumptionFailedError("Unknown category")
-			};
-
-			CreativeInventory::getInstance()->add($block->asItem(), $category, $group);
 		}
 
-		$this->blockPaletteEntries[] = new BlockPaletteEntry($identifier, new CacheableNbt($propertiesTag));
+		foreach($propertiesTags as $protocolId => $propertiesTag){
+			$this->blockPaletteEntries[$protocolId][] = new BlockPaletteEntry($identifier, new CacheableNbt($propertiesTag));
+		}
 		$this->blockFuncs[$identifier] = [$blockFunc, $serializer, $deserializer];
+	}
 
-		// 1.20.60 added a new "block_id" field which depends on the order of the block palette entries. Every time we
-		// insert a new block, we need to re-sort the block palette entries to keep in sync with the client.
-		usort($this->blockPaletteEntries, static function(BlockPaletteEntry $a, BlockPaletteEntry $b): int {
-			return strcmp(hash("fnv164", $a->getName()), hash("fnv164", $b->getName()));
-		});
-		foreach($this->blockPaletteEntries as $i => $entry) {
-			$root = $entry->getStates()->getRoot()
-				->setTag("vanilla_block_data", CompoundTag::create()
-					->setInt("block_id", 10000 + $i));
-			$this->blockPaletteEntries[$i] = new BlockPaletteEntry($entry->getName(), new CacheableNbt($root));
+	public function sort(): void {
+		foreach($this->blockPaletteEntries as $protocolId => $entries){
+			if($protocolId < 649){
+				continue;
+			}
+			// 1.20.60 added a new "block_id" field which depends on the order of the block palette entries. Every time we
+			// insert a new block, we need to re-sort the block palette entries to keep in sync with the client.
+			usort($entries, static function(BlockPaletteEntry $a, BlockPaletteEntry $b): int {
+				return strcmp(hash("fnv164", $a->getName()), hash("fnv164", $b->getName()));
+			});
+			foreach($entries as $i => $entry){
+				$root = $entry->getStates()->getRoot()
+					->setTag("vanilla_block_data", CompoundTag::create()
+						->setInt("block_id", 10000 + $i));
+				$this->blockPaletteEntries[$protocolId][$i] = new BlockPaletteEntry($entry->getName(), new CacheableNbt($root));
+			}
 		}
+		$this->sorted = true;
 	}
 }

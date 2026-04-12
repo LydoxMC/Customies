@@ -17,6 +17,7 @@ use pocketmine\item\StringToItemParser;
 use pocketmine\lang\Translatable;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\network\mcpe\convert\TypeConverter;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\types\CacheableNbt;
 use pocketmine\network\mcpe\protocol\types\ItemTypeEntry;
 use pocketmine\utils\AssumptionFailedError;
@@ -25,6 +26,7 @@ use pocketmine\world\format\io\GlobalItemDataHandlers;
 use ReflectionClass;
 use RuntimeException;
 
+use function array_unique;
 use function array_values;
 
 final class CustomiesItemFactory {
@@ -154,23 +156,31 @@ final class CustomiesItemFactory {
 	 * Registers a custom item ID to the required mappings in the global ItemTypeDictionary instance.
 	 */
 	private function registerCustomItemMapping(string $identifier, int $itemId, ItemTypeEntry $entry): void {
-		$dictionary = TypeConverter::getInstance()->getItemTypeDictionary();
-		$reflection = new ReflectionClass($dictionary);
+		$protocols = array_unique([...ProtocolInfo::ACCEPTED_PROTOCOL, ProtocolInfo::CURRENT_PROTOCOL]);
+		foreach($protocols as $protocolId){
+			try{
+				$dictionary = TypeConverter::getInstance($protocolId)->getItemTypeDictionary();
+			}catch(\Throwable){
+				// Some protocol IDs in forks may not have converter assets loaded; skip those safely.
+				continue;
+			}
+			$reflection = new ReflectionClass($dictionary);
 
-		$intToString = $reflection->getProperty("intToStringIdMap");
-		/** @var int[] $value */
-		$value = $intToString->getValue($dictionary);
-		$intToString->setValue($dictionary, $value + [$itemId => $identifier]);
+			$intToString = $reflection->getProperty("intToStringIdMap");
+			/** @var int[] $value */
+			$value = $intToString->getValue($dictionary);
+			$intToString->setValue($dictionary, $value + [$itemId => $identifier]);
 
-		$stringToInt = $reflection->getProperty("stringToIntMap");
-		/** @var int[] $value */
-		$value = $stringToInt->getValue($dictionary);
-		$stringToInt->setValue($dictionary, $value + [$identifier => $itemId]);
+			$stringToInt = $reflection->getProperty("stringToIntMap");
+			/** @var int[] $value */
+			$value = $stringToInt->getValue($dictionary);
+			$stringToInt->setValue($dictionary, $value + [$identifier => $itemId]);
 
-		$itemTypes = $reflection->getProperty("itemTypes");
-		$value = $itemTypes->getValue($dictionary);
-		$value[] = $entry;
-		$itemTypes->setValue($dictionary, $value);
+			$itemTypes = $reflection->getProperty("itemTypes");
+			$value = $itemTypes->getValue($dictionary);
+			$value[] = $entry;
+			$itemTypes->setValue($dictionary, $value);
+		}
 	}
 
 	/**
