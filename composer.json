@@ -1,0 +1,10 @@
+{
+    "name": "zeqa/customies",
+    "description": "Customies modified for NG-PM compatibility",
+    "autoload": {
+        "psr-4": {
+            "customiesdevs\\customies\\": "src/"
+        }
+    },
+    "require": {}
+}
