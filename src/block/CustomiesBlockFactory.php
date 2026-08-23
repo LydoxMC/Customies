@@ -35,6 +35,7 @@ use function array_merge;
 use function array_reverse;
 use function hash;
 use function ksort;
+use function min;
 use function strcmp;
 use function usort;
 
@@ -59,11 +60,14 @@ final class CustomiesBlockFactory {
 	 * can result in massive issues with almost every block showing as the wrong thing and causing lag to clients.
 	 */
 	public function addWorkerInitHook(string $cachePath): void {
+		if($this->blockFuncs === []){
+			return;
+		}
 		$server = Server::getInstance();
 		$blocks = $this->blockFuncs;
-//		$server->getAsyncPool()->addWorkerStartHook(static function (int $worker) use ($cachePath, $server, $blocks): void {
-//			$server->getAsyncPool()->submitTaskToWorker(new AsyncRegisterBlocksTask($cachePath, $blocks), $worker);
-//		});
+		$server->getAsyncPool()->addWorkerStartHook(static function (int $worker) use ($cachePath, $server, $blocks): void {
+			$server->getAsyncPool()->submitTaskToWorker(new AsyncRegisterBlocksTask($cachePath, $blocks), $worker);
+		});
 	}
 
 	/**
@@ -97,6 +101,10 @@ final class CustomiesBlockFactory {
 		if($protocolId === null){
 			return $this->blockPaletteEntries;
 		}
+		// Entries are keyed by the OLDEST protocol they apply to, so a client newer than CURRENT_PROTOCOL
+		// (this fork accepts up to 1.26.40 while CURRENT_PROTOCOL is 1.26.0) has to fall back to the
+		// current entries instead of matching nothing and being sent an empty palette.
+		$protocolId = min($protocolId, ProtocolInfo::CURRENT_PROTOCOL);
 		$blockPaletteEntries = [];
 		foreach($this->blockPaletteEntries as $paletteProtocol => $entries){
 			if($protocolId <= $paletteProtocol){

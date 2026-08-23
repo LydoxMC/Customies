@@ -10,6 +10,7 @@ use pocketmine\block\Block;
 use pocketmine\data\bedrock\block\convert\BlockStateReader;
 use pocketmine\data\bedrock\block\convert\BlockStateWriter;
 use pocketmine\scheduler\AsyncTask;
+use pocketmine\world\format\io\GlobalBlockStateHandlers;
 
 final class AsyncRegisterBlocksTask extends AsyncTask {
 
@@ -34,6 +35,12 @@ final class AsyncRegisterBlocksTask extends AsyncTask {
 	}
 
 	public function onRun(): void {
+		// Block type IDs are handed out by a per-thread counter, so every thread has to allocate them in the
+		// same order or the IDs mean different things on each one. On the main thread the core block
+		// bootstrap (and any IDs it hands out) has long since run by the time a plugin registers a custom
+		// block; here it has not, and $blockFunc() below allocates an ID as its very first act. Forcing the
+		// bootstrap now puts the counter where the main thread had it.
+		GlobalBlockStateHandlers::getSerializer();
 		foreach($this->blockFuncs as $identifier => $blockFunc){
 			// We do not care about the model or creative inventory data in other threads since it is unused outside of
 			// the main thread.
