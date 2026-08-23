@@ -44,11 +44,14 @@ trait BlockComponentsTrait {
 	 */
 	protected function initComponent(string $texture, bool $useGeometry = true): void {
 		$this->addComponent(new BreathabilityComponent());
-		$this->addComponent(new DestructibleByExplosionComponent());
+		$this->addComponent(new DestructibleByExplosionComponent($this->getBreakInfo()->getBlastResistance()));
 		$this->addComponent(new DestructibleByMiningComponent($this->getBreakInfo()->getHardness()));
 		$this->addComponent(new LightEmissionComponent($this->getLightLevel()));
 		$this->addComponent(new LightDampeningComponent($this->getLightFilter()));
-		$this->addComponent(new FrictionComponent($this->getFrictionFactor()));
+		// The two engines measure opposite things: PocketMine's friction factor is how much velocity the
+		// block keeps (0.6 normal, 0.98 ice) while the client's component is actual friction (0.4 normal,
+		// 0.02 ice). Passing the PocketMine value through unconverted makes the block behave inversely.
+		$this->addComponent(new FrictionComponent(1.0 - $this->getFrictionFactor()));
 		if ($useGeometry){
 			$this->addComponent(new GeometryComponent());
 		}
