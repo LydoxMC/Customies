@@ -6,6 +6,7 @@ namespace customiesdevs\customies\item;
 use Closure;
 use customiesdevs\customies\util\NBT;
 use InvalidArgumentException;
+use pmmp\thread\Thread as NativeThread;
 use pocketmine\block\Block;
 use pocketmine\data\bedrock\item\BlockItemIdMap;
 use pocketmine\data\bedrock\item\SavedItemData;
@@ -18,6 +19,7 @@ use pocketmine\lang\Translatable;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\network\mcpe\convert\TypeConverter;
 use pocketmine\network\mcpe\protocol\ProtocolInfo;
+use pocketmine\network\mcpe\protocol\serializer\ItemTypeDictionary;
 use pocketmine\network\mcpe\protocol\types\CacheableNbt;
 use pocketmine\network\mcpe\protocol\types\ItemTypeEntry;
 use pocketmine\utils\AssumptionFailedError;
@@ -36,6 +38,9 @@ final class CustomiesItemFactory {
 	 * @var ItemTypeEntry[]
 	 */
 	private array $itemTableEntries = [];
+	/** @var list<array{string, int, ItemTypeEntry}> */
+	private array $threadMappings = [];
+	private bool $threadListenerRegistered = false;
 	private array $groups = [];
 
 	/**
@@ -156,6 +161,21 @@ final class CustomiesItemFactory {
 	 * Registers a custom item ID to the required mappings in the global ItemTypeDictionary instance.
 	 */
 	private function registerCustomItemMapping(string $identifier, int $itemId, ItemTypeEntry $entry): void {
+		if(NativeThread::getCurrentThread() !== null){
+			$this->threadMappings[] = [$identifier, $itemId, $entry];
+			if(!$this->threadListenerRegistered){
+				$this->threadListenerRegistered = true;
+				TypeConverter::addCreationListener(function(TypeConverter $converter): void {
+					foreach($this->threadMappings as [$identifier, $itemId, $entry]){
+						$this->applyItemMapping($converter->getItemTypeDictionary(), $identifier, $itemId, $entry);
+					}
+				});
+			}
+			foreach(TypeConverter::getAll() as $converter){
+				$this->applyItemMapping($converter->getItemTypeDictionary(), $identifier, $itemId, $entry);
+			}
+			return;
+		}
 		$protocols = array_unique([...ProtocolInfo::ACCEPTED_PROTOCOL, ProtocolInfo::CURRENT_PROTOCOL]);
 		foreach($protocols as $protocolId){
 			try{
@@ -164,23 +184,27 @@ final class CustomiesItemFactory {
 				// Some protocol IDs in forks may not have converter assets loaded; skip those safely.
 				continue;
 			}
-			$reflection = new ReflectionClass($dictionary);
-
-			$intToString = $reflection->getProperty("intToStringIdMap");
-			/** @var int[] $value */
-			$value = $intToString->getValue($dictionary);
-			$intToString->setValue($dictionary, $value + [$itemId => $identifier]);
-
-			$stringToInt = $reflection->getProperty("stringToIntMap");
-			/** @var int[] $value */
-			$value = $stringToInt->getValue($dictionary);
-			$stringToInt->setValue($dictionary, $value + [$identifier => $itemId]);
-
-			$itemTypes = $reflection->getProperty("itemTypes");
-			$value = $itemTypes->getValue($dictionary);
-			$value[] = $entry;
-			$itemTypes->setValue($dictionary, $value);
+			$this->applyItemMapping($dictionary, $identifier, $itemId, $entry);
 		}
+	}
+
+	private function applyItemMapping(ItemTypeDictionary $dictionary, string $identifier, int $itemId, ItemTypeEntry $entry): void {
+		$reflection = new ReflectionClass($dictionary);
+
+		$intToString = $reflection->getProperty("intToStringIdMap");
+		/** @var int[] $value */
+		$value = $intToString->getValue($dictionary);
+		$intToString->setValue($dictionary, $value + [$itemId => $identifier]);
+
+		$stringToInt = $reflection->getProperty("stringToIntMap");
+		/** @var int[] $value */
+		$value = $stringToInt->getValue($dictionary);
+		$stringToInt->setValue($dictionary, $value + [$identifier => $itemId]);
+
+		$itemTypes = $reflection->getProperty("itemTypes");
+		$value = $itemTypes->getValue($dictionary);
+		$value[] = $entry;
+		$itemTypes->setValue($dictionary, $value);
 	}
 
 	/**
