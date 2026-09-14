@@ -59,7 +59,20 @@ final class CustomiesListener implements Listener {
 					$this->cachedBlockPalette[$protocolId] = CustomiesBlockFactory::getInstance()->getBlockPaletteEntries($protocolId);
 				}
 				$packet->levelSettings->experiments = $this->experiments;
-				$packet->blockPalette = $this->cachedBlockPalette[$protocolId];
+				// The server may already have blocks in here that the client needs (1.26.50 clients get the wool and
+				// concrete slabs and stairs as data-driven blocks this way), so add ours to that list instead of
+				// replacing it. Overwriting it made every one of those blocks show up as the wrong block on 1.26.50.
+				// Anything already in the list is skipped so two plugins sharing this library don't send a block twice.
+				$present = [];
+				foreach($packet->blockPalette as $entry){
+					$present[$entry->getName()] = true;
+				}
+				foreach($this->cachedBlockPalette[$protocolId] as $entry){
+					if(!isset($present[$entry->getName()])){
+						$packet->blockPalette[] = $entry;
+						$present[$entry->getName()] = true;
+					}
+				}
 				if($protocolId < ProtocolInfo::PROTOCOL_1_21_60){
 					$sendLegacyItemRegistry = true;
 				}
