@@ -6,7 +6,6 @@ namespace customiesdevs\customies\item;
 use Closure;
 use customiesdevs\customies\util\NBT;
 use InvalidArgumentException;
-use pmmp\thread\Thread as NativeThread;
 use pocketmine\block\Block;
 use pocketmine\data\bedrock\item\BlockItemIdMap;
 use pocketmine\data\bedrock\item\SavedItemData;
@@ -18,7 +17,6 @@ use pocketmine\item\StringToItemParser;
 use pocketmine\lang\Translatable;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\network\mcpe\convert\TypeConverter;
-use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\serializer\ItemTypeDictionary;
 use pocketmine\network\mcpe\protocol\types\CacheableNbt;
 use pocketmine\network\mcpe\protocol\types\ItemTypeEntry;
@@ -28,7 +26,6 @@ use pocketmine\world\format\io\GlobalItemDataHandlers;
 use ReflectionClass;
 use RuntimeException;
 
-use function array_unique;
 use function array_values;
 
 final class CustomiesItemFactory {
@@ -161,30 +158,21 @@ final class CustomiesItemFactory {
 	 * Registers a custom item ID to the required mappings in the global ItemTypeDictionary instance.
 	 */
 	private function registerCustomItemMapping(string $identifier, int $itemId, ItemTypeEntry $entry): void {
-		if(NativeThread::getCurrentThread() !== null){
-			$this->threadMappings[] = [$identifier, $itemId, $entry];
-			if(!$this->threadListenerRegistered){
-				$this->threadListenerRegistered = true;
-				TypeConverter::addCreationListener(function(TypeConverter $converter): void {
-					foreach($this->threadMappings as [$identifier, $itemId, $entry]){
-						$this->applyItemMapping($converter->getItemTypeDictionary(), $identifier, $itemId, $entry);
-					}
-				});
-			}
-			foreach(TypeConverter::getAll() as $converter){
-				$this->applyItemMapping($converter->getItemTypeDictionary(), $identifier, $itemId, $entry);
-			}
-			return;
+		$this->threadMappings[] = [$identifier, $itemId, $entry];
+		if(!$this->threadListenerRegistered){
+			$this->threadListenerRegistered = true;
+			TypeConverter::addCreationListener(function(TypeConverter $converter): void {
+				foreach($this->threadMappings as [$identifier, $itemId, $entry]){
+					$this->applyItemMapping($converter->getItemTypeDictionary(), $identifier, $itemId, $entry);
+				}
+			});
 		}
-		$protocols = array_unique([...ProtocolInfo::ACCEPTED_PROTOCOL, ProtocolInfo::CURRENT_PROTOCOL]);
-		foreach($protocols as $protocolId){
-			try{
-				$dictionary = TypeConverter::getInstance($protocolId)->getItemTypeDictionary();
-			}catch(\Throwable){
-				// Some protocol IDs in forks may not have converter assets loaded; skip those safely.
-				continue;
-			}
-			$this->applyItemMapping($dictionary, $identifier, $itemId, $entry);
+
+		// Do not eagerly construct a full TypeConverter for every supported protocol here.
+		// Each converter loads large item and block dictionaries. Existing converters are
+		// updated now; converters created later are handled by the listener above.
+		foreach(TypeConverter::getAll() as $converter){
+			$this->applyItemMapping($converter->getItemTypeDictionary(), $identifier, $itemId, $entry);
 		}
 	}
 
